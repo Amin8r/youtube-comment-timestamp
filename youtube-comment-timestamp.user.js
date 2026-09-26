@@ -1,13 +1,14 @@
 // ==UserScript==
-// @name         YouTube Comment Timestamps: Picture-in-Picture, No Scroll
+// @name         YouTube Comment Timestamps Without Scrolling
 // @namespace    https://github.com/Amin8r/youtube-comment-timestamp
-// @version      1.0.0
-// @description  Clicking a timestamp in the comments jumps the video to that time without scrolling back up to the player, and pops the video out into an always-on-top Picture-in-Picture window.
+// @version      1.1.0
+// @description  Clicking a timestamp in the comments jumps the video to that time without scrolling back up to the player, and keeps the video playing in a mini-player in the corner while you read.
 // @author       Amin8r
 // @homepageURL  https://github.com/Amin8r/youtube-comment-timestamp
 // @supportURL   https://github.com/Amin8r/youtube-comment-timestamp/issues
 // @match        https://www.youtube.com/*
 // @icon         https://www.youtube.com/favicon.ico
+// @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
@@ -25,8 +26,9 @@
 
   // Toggled from the userscript manager's menu and remembered between visits.
   const SETTINGS = [
-    { key: 'pip', label: 'Picture-in-Picture when the player is off-screen', initial: true },
-    { key: 'exitPip', label: 'Leave Picture-in-Picture when back at the player', initial: true },
+    { key: 'miniPlayer', label: 'Mini-player when the player is off-screen', initial: true },
+    { key: 'usePip', label: 'Use a Picture-in-Picture window instead of the in-page mini-player', initial: false },
+    { key: 'returnToPlayer', label: 'Put the video back when you scroll up to the player', initial: true },
     { key: 'description', label: 'Also handle timestamps in the description', initial: false },
   ];
 
@@ -36,7 +38,83 @@
   const COMMENTS = 'ytd-comments, ytd-comment-thread-renderer, ytd-comment-view-model, ytd-comment-renderer';
   const DESCRIPTION = 'ytd-watch-metadata #description, ytd-text-inline-expander, ytd-structured-description-content-renderer';
 
-  const LOG_PREFIX = '[YouTube timestamp PiP]';
+  // Set on #movie_player while it floats. An attribute rather than a class, so YouTube's
+  // own class changes on the player can't remove it.
+  const MINI = 'data-ytct-mini';
+  const CLOSE_ID = 'ytct-mini-close';
+  const MINI_CSS = `
+    :root {
+      --ytct-mini-width: min(400px, calc(100vw - 32px));
+      --ytct-mini-height: calc(var(--ytct-mini-width) * 9 / 16);
+    }
+    #movie_player[${MINI}] {
+      display: block !important;
+      position: fixed !important;
+      inset: auto 16px 16px auto !important;
+      width: var(--ytct-mini-width) !important;
+      height: var(--ytct-mini-height) !important;
+      min-width: 0 !important;
+      min-height: 0 !important;
+      max-width: none !important;
+      max-height: none !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      border: 0 !important;
+      border-radius: 12px !important;
+      overflow: hidden !important;
+      background: #000 !important;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45) !important;
+      z-index: 2147483000 !important;
+    }
+    /* Fit the video to the mini-player even before YouTube lays the player out again. */
+    #movie_player[${MINI}] .html5-video-container {
+      width: 100% !important;
+      height: 100% !important;
+    }
+    #movie_player[${MINI}] video {
+      width: 100% !important;
+      height: 100% !important;
+      left: 0 !important;
+      top: 0 !important;
+      object-fit: contain !important;
+    }
+    /* YouTube didn't lay its controls out for the smaller size: show just the video. */
+    #movie_player[${MINI}="bare"] :is(.ytp-chrome-top, .ytp-chrome-bottom, .ytp-gradient-top,
+      .ytp-gradient-bottom, .ytp-caption-window-container) {
+      display: none !important;
+    }
+    #${CLOSE_ID} {
+      position: fixed !important;
+      inset: auto 16px calc(16px + var(--ytct-mini-height) + 8px) auto !important;
+      box-sizing: border-box !important;
+      width: 32px !important;
+      height: 32px !important;
+      margin: 0 !important;
+      padding: 6px !important;
+      border: 0 !important;
+      border-radius: 50% !important;
+      background: rgba(15, 15, 15, 0.9) !important;
+      color: #fff !important;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4) !important;
+      cursor: pointer !important;
+      overflow: visible !important;
+      z-index: 2147483001 !important;
+    }
+    #${CLOSE_ID}:hover {
+      background: #3f3f3f !important;
+    }
+    #${CLOSE_ID}:focus-visible {
+      outline: 2px solid #3ea6ff !important;
+      outline-offset: 2px !important;
+    }
+    #${CLOSE_ID} svg {
+      display: block;
+      width: 20px;
+      height: 20px;
+    }
+  `;
+
+  const LOG_PREFIX = '[YouTube comment timestamps]';
 
   const store = {
     get(key, fallback) {
@@ -56,8 +134,10 @@
   };
 
   const settings = Object.fromEntries(SETTINGS.map(({ key, initial }) => [key, store.get(key, initial)]));
-  let firefoxHintShown = store.get('firefoxHintShown', false);
   let menuIds = [];
+  let mini = null; // { player, video, slot, restoreSlot, keeper } while the player floats
+  let closeButton = null;
+  let stylesAdded = false;
   let pipRequest = null;
   let returnWatcher = null;
   let toastBox = null;
@@ -67,6 +147,10 @@
   // take over never reaches the code that scrolls up to the player.
   window.addEventListener('click', onClick, true);
   window.addEventListener('keydown', onKeyDown, true);
+  // Leaving the page or going fullscreen puts the player back where YouTube expects it.
+  document.addEventListener('yt-navigate-start', () => closeMiniPlayer());
+  window.addEventListener('popstate', () => closeMiniPlayer());
+  document.addEventListener('fullscreenchange', () => closeMiniPlayer());
   buildMenu();
 
   function onClick(event) {
@@ -172,12 +256,12 @@
   }
 
   function jump(player, video, api, seconds) {
-    // The browser only opens Picture-in-Picture during a user gesture, so ask before anything else.
-    const inPip = shouldEnterPip(player, video) ? enterPip(video) : Promise.resolve(isInPip(video));
+    // Picture-in-Picture only opens during a user gesture, so pop out before anything else.
+    const poppedOut = shouldPopOut(player, video) ? popOut(player, video) : Promise.resolve(isPoppedOut(video));
     seek(video, api, seconds);
-    inPip.then((pip) => {
+    poppedOut.then((shown) => {
       // Only confirm the jump when the video isn't visible anywhere.
-      if (!pip && visibleShare(player) < ON_SCREEN) toast(`Jumped to ${formatTime(seconds)}`, pipHint());
+      if (!shown && visibleShare(player) < ON_SCREEN) toast(`Jumped to ${formatTime(seconds)}`);
     });
   }
 
@@ -195,9 +279,173 @@
     video.play()?.catch(() => {});
   }
 
-  function shouldEnterPip(player, video) {
-    return settings.pip && !document.fullscreenElement && !isInPip(video) && visibleShare(player) < ON_SCREEN;
+  function pause(player, video) {
+    const api = playerApi(player);
+    try {
+      if (typeof api?.pauseVideo === 'function') {
+        api.pauseVideo();
+        return;
+      }
+    } catch {
+      // Fall back to the <video> element.
+    }
+    video.pause();
   }
+
+  function shouldPopOut(player, video) {
+    return settings.miniPlayer && !document.fullscreenElement && !isPoppedOut(video) && visibleShare(player) < ON_SCREEN;
+  }
+
+  function isPoppedOut(video) {
+    return Boolean(mini) || isInPip(video);
+  }
+
+  async function popOut(player, video) {
+    if (settings.usePip && (await enterPip(video))) return true;
+    return openMiniPlayer(player, video);
+  }
+
+  /* ---------------------------------------------------------------------------------- */
+  /* In-page mini-player: YouTube's own player, floated into the corner.                 */
+
+  function openMiniPlayer(player, video) {
+    if (mini) return true; // Two clicks can both fall back here from one failed PiP request.
+    const slot = player.parentElement;
+    if (!slot) return false;
+    addStyles();
+    const slotSize = slot.getBoundingClientRect();
+    player.setAttribute(MINI, '');
+    showInTopLayer(player);
+    const session = { player, video, slot, restoreSlot: null, keeper: 0 };
+    mini = session;
+    keepSlotSize(slotSize);
+    showCloseButton();
+    relayout();
+    setTimeout(() => {
+      if (mini !== session) return;
+      keepSlotSize(slotSize);
+      checkControlsFit();
+    }, 700);
+    session.keeper = setInterval(keepOnTop, 1000);
+    watchForReturn(slot, () => closeMiniPlayer());
+    return true;
+  }
+
+  function closeMiniPlayer(pauseVideo = false) {
+    if (!mini) return;
+    const { player, video, restoreSlot, keeper } = mini;
+    mini = null;
+    clearInterval(keeper);
+    stopWatchingForReturn();
+    removeFromTopLayer(player);
+    player.removeAttribute(MINI);
+    restoreSlot?.();
+    if (closeButton) {
+      removeFromTopLayer(closeButton);
+      closeButton.remove();
+    }
+    relayout();
+    if (pauseVideo) pause(player, video);
+  }
+
+  // With the player floating, its spot in the page would collapse if YouTube sized it by
+  // its content; hold it at its size so the comments you're reading don't move.
+  function keepSlotSize(size) {
+    if (!mini || mini.restoreSlot) return;
+    const { slot } = mini;
+    const now = slot.getBoundingClientRect();
+    if (now.width >= size.width - 1 && now.height >= size.height - 1) return;
+    const { minWidth, minHeight } = slot.style;
+    slot.style.minWidth = `${size.width}px`;
+    slot.style.minHeight = `${size.height}px`;
+    mini.restoreSlot = () => Object.assign(slot.style, { minWidth, minHeight });
+  }
+
+  function checkControlsFit() {
+    const bar = mini.player.querySelector('.ytp-chrome-bottom');
+    if (bar && bar.getBoundingClientRect().width > mini.player.getBoundingClientRect().width + 1) {
+      mini.player.setAttribute(MINI, 'bare');
+    }
+  }
+
+  // YouTube lays out the video and its controls for the player's size on window resize.
+  function relayout() {
+    window.dispatchEvent(new Event('resize'));
+  }
+
+  // Popovers render in the top layer: above the whole page, whatever the player's
+  // ancestors do with z-index, transforms or overflow.
+  function showInTopLayer(element) {
+    if (typeof element.showPopover !== 'function') return;
+    if (!element.hasAttribute('popover')) element.setAttribute('popover', 'manual');
+    if (element.matches(':popover-open')) return;
+    try {
+      element.showPopover();
+    } catch {
+      element.removeAttribute('popover');
+    }
+  }
+
+  function removeFromTopLayer(element) {
+    if (!element.hasAttribute('popover')) return;
+    try {
+      element.hidePopover();
+    } catch {
+      // Already hidden.
+    }
+    element.removeAttribute('popover');
+  }
+
+  // Moving an element in the DOM takes it out of the top layer, and YouTube moves the
+  // player around, e.g. for theater mode.
+  function keepOnTop() {
+    if (mini?.player.hasAttribute('popover') && !mini.player.matches(':popover-open')) showInTopLayer(mini.player);
+  }
+
+  function addStyles() {
+    if (stylesAdded) return;
+    stylesAdded = true;
+    if (typeof GM_addStyle === 'function') {
+      try {
+        GM_addStyle(MINI_CSS);
+        return;
+      } catch {
+        // Fall back to a plain <style> element.
+      }
+    }
+    const style = document.createElement('style');
+    style.textContent = MINI_CSS;
+    (document.head ?? document.documentElement).append(style);
+  }
+
+  function showCloseButton() {
+    closeButton ??= createCloseButton();
+    document.body.append(closeButton);
+    showInTopLayer(closeButton);
+  }
+
+  function createCloseButton() {
+    const button = document.createElement('button');
+    button.id = CLOSE_ID;
+    button.type = 'button';
+    button.title = 'Close mini-player';
+    button.setAttribute('aria-label', 'Close mini-player');
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const icon = document.createElementNS(svgNs, 'svg');
+    icon.setAttribute('viewBox', '0 0 24 24');
+    const cross = document.createElementNS(svgNs, 'path');
+    cross.setAttribute('d', 'M6 6l12 12M18 6L6 18');
+    cross.setAttribute('stroke', 'currentColor');
+    cross.setAttribute('stroke-width', '2');
+    cross.setAttribute('stroke-linecap', 'round');
+    icon.append(cross);
+    button.append(icon);
+    button.addEventListener('click', () => closeMiniPlayer(true));
+    return button;
+  }
+
+  /* ---------------------------------------------------------------------------------- */
+  /* Picture-in-Picture window (opt-in).                                                  */
 
   function isInPip(video) {
     return document.pictureInPictureElement === video;
@@ -216,31 +464,14 @@
       if (video.readyState < HTMLMediaElement.HAVE_METADATA) await nextEvent(video, 'loadedmetadata', 3000);
       await video.requestPictureInPicture();
     } catch (error) {
-      console.warn(LOG_PREFIX, 'Could not open Picture-in-Picture:', error);
+      console.warn(LOG_PREFIX, 'Could not open Picture-in-Picture, using the mini-player instead:', error);
       return false;
     }
-    exitWhenPlayerReturns(video);
+    watchForReturn(video.closest('#movie_player') ?? video, () => {
+      if (isInPip(video)) document.exitPictureInPicture().catch(() => {});
+    });
+    video.addEventListener('leavepictureinpicture', stopWatchingForReturn, { once: true });
     return true;
-  }
-
-  // Put the video back into the page once the player is scrolled back into view.
-  function exitWhenPlayerReturns(video) {
-    returnWatcher?.disconnect();
-    const player = video.closest('#movie_player') ?? video;
-    let wasOnScreen = null;
-    const watcher = new IntersectionObserver((entries) => {
-      const onScreen = entries[entries.length - 1].intersectionRatio >= ON_SCREEN;
-      if (onScreen && wasOnScreen === false && settings.exitPip && isInPip(video)) {
-        document.exitPictureInPicture().catch(() => {});
-      }
-      wasOnScreen = onScreen;
-    }, { threshold: ON_SCREEN });
-    watcher.observe(player);
-    returnWatcher = watcher;
-    video.addEventListener('leavepictureinpicture', () => {
-      watcher.disconnect();
-      if (returnWatcher === watcher) returnWatcher = null;
-    }, { once: true });
   }
 
   function nextEvent(target, type, timeoutMs) {
@@ -257,22 +488,30 @@
     });
   }
 
+  /* ---------------------------------------------------------------------------------- */
+
+  // Call onReturn once the player's place in the page is scrolled back into view.
+  function watchForReturn(target, onReturn) {
+    stopWatchingForReturn();
+    let wasOnScreen = null;
+    returnWatcher = new IntersectionObserver((entries) => {
+      const onScreen = entries[entries.length - 1].intersectionRatio >= ON_SCREEN;
+      if (onScreen && wasOnScreen === false && settings.returnToPlayer) onReturn();
+      wasOnScreen = onScreen;
+    }, { threshold: ON_SCREEN });
+    returnWatcher.observe(target);
+  }
+
+  function stopWatchingForReturn() {
+    returnWatcher?.disconnect();
+    returnWatcher = null;
+  }
+
   function visibleShare(element) {
     const rect = element.getBoundingClientRect();
     const width = Math.min(rect.right, document.documentElement.clientWidth) - Math.max(rect.left, 0);
     const height = Math.min(rect.bottom, document.documentElement.clientHeight) - Math.max(rect.top, 0);
     return width > 0 && height > 0 ? (width * height) / (rect.width * rect.height) : 0;
-  }
-
-  function pipHint() {
-    if (!settings.pip) return '';
-    if ('pictureInPictureEnabled' in document) return "Couldn't open Picture-in-Picture.";
-    // Firefox has no API for pages or userscripts to open its Picture-in-Picture window.
-    if (firefoxHintShown || !/Firefox\//.test(navigator.userAgent)) return '';
-    firefoxHintShown = true;
-    store.set('firefoxHintShown', true);
-    const keys = /Mac/.test(navigator.platform) ? '⌘ ⌥ ⇧ ]' : 'Ctrl+Shift+]';
-    return `Firefox doesn't let scripts open Picture-in-Picture. Open it yourself once (${keys}, or the Picture-in-Picture button on the video) and the timestamps you click will play there.`;
   }
 
   function formatTime(totalSeconds) {
@@ -283,7 +522,7 @@
     return hours ? `${hours}:${pad(minutes)}:${pad(s % 60)}` : `${minutes}:${pad(s % 60)}`;
   }
 
-  function toast(text, hint = '') {
+  function toast(text) {
     const parent = document.body ?? document.documentElement;
     if (!parent) return;
     if (!toastBox) {
@@ -308,22 +547,14 @@
         transition: 'opacity 150ms ease',
       });
     }
-    const line = document.createElement('div');
-    line.textContent = text;
-    toastBox.replaceChildren(line);
-    if (hint) {
-      const detail = document.createElement('div');
-      detail.textContent = hint;
-      Object.assign(detail.style, { marginTop: '4px', fontWeight: '400', opacity: '0.85' });
-      toastBox.append(detail);
-    }
+    toastBox.textContent = text;
     if (!toastBox.isConnected) parent.append(toastBox);
     void toastBox.offsetWidth; // Start from the current opacity so the fade-in runs.
     toastBox.style.opacity = '1';
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
       toastBox.style.opacity = '0';
-    }, hint ? 9000 : 1800);
+    }, 1800);
   }
 
   function buildMenu() {
@@ -346,6 +577,7 @@
     settings[key] = !settings[key];
     store.set(key, settings[key]);
     buildMenu();
+    if (key === 'miniPlayer' || key === 'usePip') closeMiniPlayer();
     const { label } = SETTINGS.find((setting) => setting.key === key);
     toast(`${label}: ${settings[key] ? 'on' : 'off'}`);
   }
