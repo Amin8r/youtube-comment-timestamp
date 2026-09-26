@@ -6,9 +6,9 @@ By default, clicking a timestamp like `1:23` in a comment scrolls the page all t
 
 - **keeps the page where it is**, so you can carry on reading,
 - **jumps the video to that time** and plays it,
-- **opens the video in Picture-in-Picture**, a small window that stays on top of your other windows.
+- **shows the video in a mini-player** in the bottom-right corner of the page, with YouTube's usual controls.
 
-Clicking more timestamps while you read moves the Picture-in-Picture video to each one. When you scroll back up to the player, the video goes back into the page.
+Clicking more timestamps while you read moves the mini-player's video to each one. When you scroll back up to the player, the video goes back into the page. The **×** above the mini-player closes it and pauses the video.
 
 ## Install
 
@@ -22,19 +22,16 @@ On a YouTube page, click the Violentmonkey toolbar icon to see these toggles. Yo
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Picture-in-Picture when the player is off-screen | On | Turn this off if you only want the jump without the page scrolling up. |
-| Leave Picture-in-Picture when back at the player | On | Puts the video back into the page once at least half of the player is in view again. |
+| Mini-player when the player is off-screen | On | Turn this off if you only want the jump without the page scrolling up. |
+| Use a Picture-in-Picture window instead of the in-page mini-player | Off | Shows the video in the browser's Picture-in-Picture window, which stays on top of your other windows. Chrome, Edge, Brave, Opera and other Chromium browsers only; elsewhere the in-page mini-player is used. |
+| Put the video back when you scroll up to the player | On | Closes the mini-player once at least half of the player's spot is in view again. |
 | Also handle timestamps in the description | Off | Handles timestamps and chapter links in the video description the same way. |
-
-## Browser support
-
-- **Chrome, Edge, Brave, Opera, Vivaldi and other Chromium browsers:** Picture-in-Picture opens automatically.
-- **Firefox:** Firefox doesn't let web pages or userscripts open Picture-in-Picture, so the script can only jump the video without scrolling. You can open Firefox's Picture-in-Picture yourself (`Ctrl+Shift+]`, `⌘ ⌥ ⇧ ]` on macOS, or the Picture-in-Picture button on the video). Timestamps you click after that play in that window.
 
 ## Good to know
 
-- Picture-in-Picture only opens when less than half of the player is on screen. If you can still see the player, for example near the top of the comments on a tall monitor or in fullscreen, the video jumps in place.
+- The mini-player only opens when less than half of the player is on screen. If you can still see the player, for example near the top of the comments on a tall monitor or in fullscreen, the video jumps in place.
+- The mini-player also closes when you go to another page or switch to fullscreen.
 - Ctrl-, Cmd-, Shift- and middle-clicking a timestamp work as usual, so you can still open a timestamp in a new tab.
 - Timestamps that link to a different video are left alone.
-- The Picture-in-Picture window is the browser's own: it has play/pause controls but doesn't show YouTube's captions.
-- The script depends on how YouTube builds its pages. If timestamps start scrolling the page up again after a YouTube update, please [open an issue](https://github.com/Amin8r/youtube-comment-timestamp/issues).
+- The Picture-in-Picture window (if you turn it on) is the browser's own: it has play/pause controls but doesn't show YouTube's captions.
+- The script depends on how YouTube builds its pages. If timestamps start scrolling the page up again, or the mini-player looks wrong after a YouTube update, please [open an issue](https://github.com/Amin8r/youtube-comment-timestamp/issues).
